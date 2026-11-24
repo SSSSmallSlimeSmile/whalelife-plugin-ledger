@@ -18,25 +18,46 @@
 - `usage_daily` —— 按天/按模型，带缓存命中率、参考金额、账本覆盖率（日志口径）
 - `usage_sessions` —— 每个会话的累计请求与 token
 
+## 权限与范围
+
+工具被调用时，看的是**这次调用的权限**，不是插件的权限。
+
+| 调用者权限 | `usage_daily` 看到 | `usage_sessions` 看到 | 对账（调 `usage_today`） |
+|---|---|---|---|
+| `full` | 全部会话的日志 | 全部会话 | 执行 |
+| `ask` / `off` | **只有自己那条会话的执行目录** | 只有自己那条会话 | 跳过，回执里写明「对账需要 full 权限」 |
+
+调用者既不是 `full`、又拿不到会话 id 时，直接回一句「没有可统计的范围」，不返回任何数据。
+
+**全局视图只开在插件页面**（`/plugins/ledger/` 及各数据接口）。这些页面要求控制台登录，未登录返回 401，算管理员入口。
+
 ## 页面
 
-`/plugins/ledger/` —— 过去 24 小时按模型堆叠、每日输入与金额切换、模型排名、会话累计、价目表编辑。
+`/plugins/ledger/` —— 24 小时图（按模型分段）、每日柱、模型排名、会话累计、价目表。
 
-明细在 `/plugins/ledger/detail`：1 / 7 / 30 天切换 + 明细表。
+`/plugins/ledger/detail` —— 1/7/30 天切换 + 明细表。
 
-数据接口三个：`/plugins/ledger/data`（会话口径，含按小时）、`/plugins/ledger/log`（日志口径）、`/plugins/ledger/days?days=N`（图表数据）。
+数据接口：`/plugins/ledger/data`（会话口径，含按小时）、`/plugins/ledger/log`（日志口径）。
+
+## 设置保存走哪条接口
+
+表单提交到 **`POST /plugins/ledger/save`**，成功回 303 到 `/plugins/ledger/`。
+价目表单独走 **`POST /plugins/ledger/price`**（JSON）。
+
+`ctx.web.page()` **只挂 GET**，在 page 的处理里判断 `req.method === "POST"` 不管用——请求会落空返回 404。要收 POST 必须用 `ctx.web.api()`，这是本插件 0.2.1 修掉的一个真问题。
+
+## 读什么、不写什么
+
+- 只读 `logDir` 下的 `*.jsonl`，文件名必须是 `YYYYMMDD` 开头，按天数先筛再读。
+- 不写宿主的任何文件；唯一会写的自己的 `data/config.json`。
+- 想清日志腾空间，那是用户自己的事，插件不碰。
 
 ## 金额不是账单
 
-按 `data/config.json` 里的价目表重算，单位是美元/百万 token。价目表在页面上可以贴 JSON 或选文件上传。算不出来就显示「—」，不猜。
+按 `data/config.json` 里的价目表重算，单位是美元/百万 token。算不出来就显示「—」，不猜。价目表可在页面下方编辑或导入。
 
-服务商不回传 cost 的（比如 MiraRouter），金额永远是参考值。
+## 历史
 
-## 仓库与历史
+原 `ledger`（0.1.x）只用会话口径。0.2.0 把 `usage-daily` 并了进来：日志口径、缓存命中、会话累计、对账，页面合成一张，工具从四个收到三个（`usage_reconcile` 并进 `usage_daily` 的返回）。
 
-本库是「账本」的唯一维护地。
-
-- 0.1.x：只有会话口径，粗糙。
-- 0.2.0：把 `usage-daily` 并了进来——日志口径、缓存命中、会话累计、对账，页面合成一张，工具从四个收到三个（`usage_reconcile` 并进 `usage_daily` 的返回）。
-
-> **`whalelife-plugin-usage-daily` 已并入本库**，那个仓库转为私有、只作历史留档，不再更新、不再发版。要装、要改、要报问题，都看这里。
+0.2.1 修了两处：设置表单 POST 落空返回 404；工具调用未按调用者权限限定统计范围。

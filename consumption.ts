@@ -162,9 +162,23 @@ export function registerConsumption(ctx: any, disposers: Array<() => void>) {
         additionalProperties: false,
       },
       danger: "safe",
-      async run(args: any) {
+      async run(args: any, session: any) {
         const days = Math.min(60, Math.max(0, Number(args?.days) || 0));
+        const permission = String(session?.permission ?? "ask");
         const summary = await sessionUsage(ctx, days);
+        if (permission !== "full") {
+          // 普通调用只给它自己那条会话，别把别人的会话标识和名称一并吐出去。
+          const mine = String(session?.id ?? "");
+          const rows = mine ? summary.sessions.filter((row) => row.id === mine) : [];
+          const chat = zero();
+          const memory = zero();
+          for (const row of rows) { add(chat, row.chat); add(memory, row.memory); }
+          const scoped: UsageSummary = { ...summary, sessions: rows, chat, memory };
+          const text = mine
+            ? usageText(scoped) + "\n范围：仅本会话（没有 full 权限，只看自己这条）。"
+            : "没有可统计的范围：当前调用既没有 full 权限，也拿不到会话 id。";
+          return { text, summary: scoped };
+        }
         return { text: usageText(summary), summary };
       },
     }),

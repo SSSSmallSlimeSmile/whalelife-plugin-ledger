@@ -95,7 +95,7 @@ async function readExecution(
   timeZone: string,
   wanted: Set<string>,
   since24 = 0,
-  hourly: Map<string, { hour: number; row: DayRow }> | null = null,
+  hourly: Map<string, { day: string; hour: number; row: DayRow }> | null = null,
 ) {
   const text = await readFile(file, "utf8");
   const rows: DayRow[] = [];
@@ -134,10 +134,11 @@ async function readExecution(
     bucket.cached += Number(usage.prompt_tokens_details?.cached_tokens) || 0;
     if (hourly && at >= since24) {
       const hour = hourOf(at, timeZone);
-      const key = `${hour}|${provider}|${modelId}`;
+      // 键里必须带日期：24 小时窗口跨日时，同一个钟点会出现两次，混在一起就分不清哪根柱子是今天的。
+      const key = `${day}|${hour}|${provider}|${modelId}`;
       let slot = hourly.get(key);
       if (!slot) {
-        slot = { hour, row: { day, provider, modelId, model, rounds: 0, input: 0, output: 0, cached: 0, cost: null } };
+        slot = { day, hour, row: { day, provider, modelId, model, rounds: 0, input: 0, output: 0, cached: 0, cost: null } };
         hourly.set(key, slot);
       }
       slot.row.rounds += 1;
@@ -151,16 +152,34 @@ async function readExecution(
 
 /** 把「钟点|provider|modelId」的桶按钟点并起来，顺手算钱。 */
 type HourPart = { name: string; rounds: number; input: number; output: number; cost: number | null };
-type HourSlot = { hour: number; rounds: number; input: number; output: number; cost: number | null; parts: HourPart[] };
+type HourSlot = { hour: number; day: string; label: string; rounds: number; input: number; output: number; cost: number | null; parts: HourPart[] };
 
 function mergeHours(
-  hourly: Map<string, { hour: number; row: DayRow }>,
+  hourly: Map<string, { day: string; hour: number; row: DayRow }>,
   price: Record<string, Price>,
-) {
-  const merged = new Map<number, HourSlot>();
-  for (const { hour, row } of hourly.values()) {
+  now: number,
+  timeZone: string,
+): HourSlot[] {
+  // 24 个真实时段，从 now-23h 排到 now。之前只按钟点 0–23 平铺，
+  // 凌晨一点看图上最右边是 23 点，像在看过期的整天；跨日时同一个钟点
+  // 还会被并成一格。现在键带日期、位置按时间排，一眼看得出这是几点。
+  const today = dayOf(now, timeZone);
+  const slots: HourSlot[] = [];
+  const index = new Map<string, HourSlot>();
+  for (let i = 23; i >= 0; i -= 1) {
+    const at = now - i * 60 * 60 * 1000;
+    const day = dayOf(at, timeZone);
+    const hour = hourOf(at, timeZone);
+    const pad = String(hour).padStart(2, "0");
+    const label = day === today ? `${pad}:00` : `${day.slice(5)} ${pad}:00`;
+    const slot: HourSlot = { hour, day, label, rounds: 0, input: 0, output: 0, cost: null, parts: [] };
+    slots.push(slot);
+    index.set(`${day}|${hour}`, slot);
+  }
+  for (const { day, hour, row } of hourly.values()) {
+    const slot = index.get(`${day}|${hour}`);
+    if (!slot) continue;
     const cost = costOf(row, price);
-    const slot = merged.get(hour) ?? { hour, rounds: 0, input: 0, output: 0, cost: null, parts: [] };
     slot.rounds += row.rounds;
     slot.input += row.input;
     slot.output += row.output;
@@ -175,11 +194,9 @@ function mergeHours(
     } else {
       slot.parts.push({ name, rounds: row.rounds, input: row.input, output: row.output, cost });
     }
-    merged.set(hour, slot);
   }
-  const out = [...merged.values()].sort((a, b) => a.hour - b.hour);
-  for (const slot of out) slot.parts.sort((a, b) => b.input - a.input);
-  return out;
+  for (const slot of slots) slot.parts.sort((a, b) => b.input - a.input);
+  return slots;
 }
 
 function priceFor(price: Record<string, Price>, provider: string, modelId: string, model: string) {
@@ -216,9 +233,9 @@ export type Summary = {
   /** 跨天合并后的排行：同一个 provider|modelId 只占一行，排名才有意义。 */
   byModelTotal: Array<DayRow & { days: number; label: string }>;
   byHour: Array<{ hour: number; rounds: number; input: number; output: number }>;
-  /** 过去 24 小时，按钟点（0–23）聚合；同一钟点在窗口里只出现一次。 */
+  /** 过去 24 小时：从 now-23h 到 now，按时间升序，固定 24 格。label 带日期以便跨日区分。 */
   byHour24: Array<{
-    hour: number; rounds: number; input: number; output: number; cost: number | null;
+    hour: number; day: string; label: string; rounds: number; input: number; output: number; cost: number | null;
     /** 这一小时里每个模型各消耗多少，前端据此堆叠上色。 */
     parts: Array<{ name: string; rounds: number; input: number; output: number; cost: number | null }>;
   }>;
@@ -257,15 +274,19 @@ function totalByModel(rows: DayRow[]): Array<DayRow & { days: number; label: str
   return [...map.values()].sort((a, b) => b.input - a.input);
 }
 
-export async function summarize(cfg: Config, days: number, now = Date.now()): Promise<Summary> {
+export async function summarize(cfg: Config, days: number, now = Date.now(), scopeSession?: string): Promise<Summary> {
   if (!cfg.logDir) throw new Error("还没配日志目录：在插件页填「执行日志目录」（<宿主目录>\\logs\\executions）再试。");
   const wanted = new Set<string>();
   for (let i = 0; i < days; i++) wanted.add(dayOf(now - i * DAY_MS, cfg.timezone));
   const since = cutoffDay(now, days, cfg.timezone);
-  const files = await jsonlFiles(cfg.logDir, since);
+  // 范围：给了 scopeSession 就只统计那条会话的执行目录——普通调用不得看全局。
+  const allFiles = await jsonlFiles(cfg.logDir, since);
+  const files = scopeSession
+    ? allFiles.filter((file) => file.split(/[\\/]/).includes(scopeSession))
+    : allFiles;
   const byModel = new Map<string, DayRow>();
   const byHour = new Map<number, { hour: number; rounds: number; input: number; output: number }>();
-  const hourly = new Map<string, { hour: number; row: DayRow }>();
+  const hourly = new Map<string, { day: string; hour: number; row: DayRow }>();
   const since24 = now - 24 * 60 * 60 * 1000;
   let scanned = 0;
   let skipped = 0;
@@ -314,16 +335,18 @@ export async function summarize(cfg: Config, days: number, now = Date.now()): Pr
     byModel: models.sort((a, b) => b.input - a.input),
     byModelTotal: totalByModel(models),
     byHour: [...byHour.values()].sort((a, b) => a.hour - b.hour),
-    byHour24: mergeHours(hourly, cfg.price),
+    byHour24: mergeHours(hourly, cfg.price, now, cfg.timezone),
   };
 }
 
 /** 读账本：只调宿主的只读工具，不改任何东西。旧宿主没有这个工具就算了。 */
-async function ledgerOf(ctx: Context, days: number) {
+async function ledgerOf(ctx: Context, days: number, permission: string = "ask") {
+  // 对账要调下游工具 usage_today 的权限沿调用者传，不替调用者升级成 full。
+  if (permission !== "full") return { ok: false, error: "对账需要 full 权限，本次调用没有，已跳过" };
   try {
     const call = (ctx.tools as any).call;
     if (typeof call !== "function") return { ok: false, error: "宿主没有 tools.call" };
-    const reply = await call("usage_today", { days }, { permission: "full" } as any);
+    const reply = await call("usage_today", { days }, { permission } as any);
     if (!reply || reply.ok !== true) return { ok: false, error: String(reply?.result ?? "账本没有回话") };
     return { ok: true, data: reply.result };
   } catch (error: any) {
@@ -365,17 +388,25 @@ export function registerUsageTools(ctx: Context, disposers: Array<() => void>) {
       additionalProperties: false,
     },
     danger: "safe",
-    async run(args: any) {
+    async run(args: any, session: any) {
       const days = Math.min(60, Math.max(1, Number(args?.days) || 1));
+      const permission = String(session?.permission ?? "ask");
+      const scopeSession = permission === "full" ? undefined : String(session?.id ?? "");
+      if (permission !== "full" && !scopeSession) {
+        return { text: "没有可统计的范围：当前调用既没有 full 权限，也拿不到会话 id。", summary: null };
+      }
       const cfg = loadConfig(ctx);
-      const summary = await summarize(cfg, days);
-      const ledger = await ledgerOf(ctx, days);
+      const summary = await summarize(cfg, days, Date.now(), scopeSession);
+      const ledger = await ledgerOf(ctx, days, permission);
       const covered = ledger.ok ? estimateCoverage(summary, ledger.data) : null;
       const tail = ledger.ok
         ? `账本（每轮最后一笔）：覆盖 ${covered ?? "算不出"}`
         : `账本没读到：${ledger.error}`;
+      const scopeNote = scopeSession
+        ? `范围：仅本会话（${scopeSession}）`
+        : "范围：全部会话（full 权限）";
       return {
-        text: reportText(summary) + "\n" + tail,
+        text: reportText(summary) + "\n" + scopeNote + "\n" + tail,
         summary,
         ledger,
         covered,
@@ -404,18 +435,6 @@ function registerPage(ctx: Context, disposers: Array<() => void>) {
   const web: any = ctx.web;
   if (!web || typeof web.page !== "function") return;
   const page = web.page("/plugins/ledger/", async (req: any, res: any) => {
-    if (req.method === "POST") {
-      const body = await readBody(req);
-      const cfg = loadConfig(ctx);
-      const next: Config = { ...cfg, ...((await ctx.config.read<Record<string, any>>("config.json").catch(() => null)) ?? {}), logDir: String(body.logDir ?? cfg.logDir).trim(), timezone: String(body.timezone ?? cfg.timezone).trim() || DEFAULTS.timezone };
-      if (body.price) {
-        try { next.price = JSON.parse(String(body.price)); } catch { next.price = cfg.price; }
-      }
-      await ctx.config.save("config.json", next);
-      res.writeHead(303, { Location: req.url });
-      res.end();
-      return;
-    }
     const url = new URL(req.url, "http://local");
     const days = Math.min(60, Math.max(1, Number(url.searchParams.get("days")) || 7));
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -435,6 +454,33 @@ function registerPage(ctx: Context, disposers: Array<() => void>) {
     res.end(JSON.stringify(payload));
   });
   if (typeof daysJson === "function") disposers.push(daysJson);
+
+  // 设置保存：web.page 只挂 GET，POST 会 404。表单走这条 POST。
+  if (typeof web.api === "function") {
+    const saveRoute = web.api("/plugins/ledger/save", async (req: any, res: any) => {
+      try {
+        const body = await readForm(req);
+        const cfg = loadConfig(ctx);
+        const raw = (await ctx.config.read<Record<string, any>>("config.json").catch(() => null)) ?? {};
+        const next: Config = {
+          ...cfg,
+          ...raw,
+          logDir: String(body.logDir ?? cfg.logDir).trim(),
+          timezone: String(body.timezone ?? cfg.timezone).trim() || DEFAULTS.timezone,
+        };
+        if (body.price) {
+          try { next.price = JSON.parse(String(body.price)); } catch { next.price = cfg.price; }
+        }
+        await ctx.config.save("config.json", next);
+        res.writeHead(303, { Location: "/plugins/ledger/" });
+        res.end();
+      } catch (error: any) {
+        res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("保存失败：" + String(error?.message ?? error));
+      }
+    });
+    if (typeof saveRoute === "function") disposers.push(saveRoute);
+  }
 
   // 价目表：页面上粘贴或选文件，走这里存盘。只改 price 一项，别的字段原样留着。
   if (typeof web.api === "function") {
@@ -457,19 +503,6 @@ function registerPage(ctx: Context, disposers: Array<() => void>) {
 
   // 明细页：原来那张表，带 1/7/30 切换。
   const detail = web.page("/plugins/ledger/detail", async (req: any, res: any) => {
-    if (req.method === "POST") {
-      const body = await readBody(req);
-      const cfg = loadConfig(ctx);
-      const next: Config = { ...cfg, ...((await ctx.config.read<Record<string, any>>("config.json").catch(() => null)) ?? {}), logDir: String(body.logDir ?? cfg.logDir).trim(),
-        timezone: String(body.timezone ?? cfg.timezone).trim() || DEFAULTS.timezone };
-      if (body.price) {
-        try { next.price = JSON.parse(String(body.price)); } catch { next.price = cfg.price; }
-      }
-      await ctx.config.save("config.json", next);
-      res.writeHead(303, { Location: req.url });
-      res.end();
-      return;
-    }
     const url = new URL(req.url ?? "/", "http://local");
     const days = Math.min(60, Math.max(1, Number(url.searchParams.get("days")) || 7));
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
@@ -492,6 +525,26 @@ function registerPage(ctx: Context, disposers: Array<() => void>) {
     res.end(JSON.stringify({ ok: !error, error, html: renderBody(cfg, days, summary, error, ledger, sessions) }));
   });
   if (typeof data === "function") disposers.push(data);
+}
+
+function readForm(req: any) {
+  return new Promise<Record<string, any>>((done, fail) => {
+    let text = "";
+    req.on("data", (chunk: any) => { text += chunk; });
+    req.on("end", () => {
+      try {
+        if (!text.trim()) return done({});
+        const type = String(req.headers?.["content-type"] ?? "");
+        if (type.includes("application/json")) return done(JSON.parse(text));
+        const out: Record<string, string> = {};
+        for (const [key, value] of new URLSearchParams(text)) out[key] = value;
+        done(out);
+      } catch (error: any) {
+        fail(new Error("解析请求体失败：" + (error?.message ?? error)));
+      }
+    });
+    req.on("error", () => fail(new Error("读取请求体失败")));
+  });
 }
 
 function readJson(req: any) {
@@ -617,7 +670,7 @@ function renderBody(cfg: Config, days: number, summary: Summary | null, error: s
   if (sessions) {
     body += renderSessions(sessions);
   }
-  body += `<details><summary>设置</summary><form method="post">
+  body += `<details><summary>设置</summary><form method="post" action="/plugins/ledger/save">
 <label>执行日志目录（必填）</label>
 <input name="logDir" value="${esc(cfg.logDir)}" placeholder="<宿主目录>\\logs\\executions">
 <label>时区</label>

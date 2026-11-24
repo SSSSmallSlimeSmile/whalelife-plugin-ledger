@@ -89,7 +89,7 @@ a.more{font-size:12.5px;text-decoration:none;color:var(--accent)}
 </style>
 <body>
 <h1>账本</h1>
-<p class="sub">读执行日志统计真实用量，只读；不改宿主的任何文件。<br><b>金额是自填价目表重算的参考值，不是服务商官方价格，也不是账单</b>——价目表由勘按公开价整理后写进插件配置；没配价目的模型显示「—」。
+<p class="sub">读执行日志统计真实用量，只读；不改宿主的任何文件。<br><b>金额是自填价目表重算的参考值，不是服务商官方价格，也不是账单</b>——价目表可在本页下方编辑或导入，由使用者自行维护；没配价目的模型显示「—」。
 <a class="more" href="/plugins/ledger/detail">看明细 →</a></p>
 <div id="chart">
   <div class="stats-grid">${
@@ -228,10 +228,11 @@ function hour24Chart(hours, metric){
   function val(d){ return isCost ? (d.cost == null ? 0 : Number(d.cost)) : (Number(d.input)||0); }
   function fmt(v){ return isCost ? money(v) : short(v); }
   function tick(v){ return isCost ? moneyTick(v) : short(v); }
-  var byHour = {};
-  (hours || []).forEach(function(h){ byHour[h.hour] = h; });
-  var slots = [];
-  for (var i = 0; i < 24; i++) slots.push(byHour[i] || { hour: i, rounds: 0, input: 0, output: 0, cost: null, parts: [] });
+  // 后端给的就是 24 格、按时间升序，直接照排；没有 label 的老数据自己补一个。
+  var slots = (hours || []).map(function(h){
+    return h && h.label ? h : Object.assign({}, h, { label: String(h.hour).padStart(2, "0") + ":00" });
+  });
+  if (!slots.length) return '<p class="sub">过去 24 小时没有记录。</p>';
   var raw = Math.max.apply(null, slots.map(val).concat([0]));
   if (!raw) return '<p class="sub">过去 24 小时没有记录。</p>';
   var step = nice(raw/4), top = step*4;
@@ -249,15 +250,15 @@ function hour24Chart(hours, metric){
       return '<span class="hour-seg" style="height:'+ph.toFixed(3)+'%;background:'+modelColor(p.name)+'" title="'+esc(p.name)+'"></span>';
     }).join("");
     var tip = d.rounds
-      ? '<div class="hour-tip'+flip+'"><strong>'+String(i).padStart(2,"0")+':00 · '+fmt(v)+'</strong>' +
+      ? '<div class="hour-tip'+flip+'"><strong>'+esc(d.label)+' · '+fmt(v)+'</strong>' +
         (d.parts||[]).map(function(p){
           var pv = isCost ? (p.cost == null ? "—" : money(p.cost)) : short(p.input);
           return '<span class="hour-tip-row"><i style="background:'+modelColor(p.name)+'"></i>'+esc(p.name)+'<b>'+pv+'</b></span>';
         }).join("") +
         '<span class="hour-tip-row">调用<b>'+n(d.rounds)+' 次</b></span>' +
         '<span class="hour-tip-row">参考<b>'+(d.cost == null ? "—" : money(d.cost))+'</b></span></div>'
-      : '<div class="hour-tip'+flip+'"><strong>'+String(i).padStart(2,"0")+':00</strong><span class="hour-tip-row empty">无记录</span></div>';
-    var mark = (i % 3 === 0) ? '<em class="hour-mark">'+String(i).padStart(2,"0")+'</em>' : "";
+      : '<div class="hour-tip'+flip+'"><strong>'+esc(d.label)+'</strong><span class="hour-tip-row empty">无记录</span></div>';
+    var mark = (i % 3 === 0) ? '<em class="hour-mark">'+esc(d.label).replace(":00","")+'</em>' : "";
     return '<div class="hour-bar'+(d.rounds?"":" day-zero")+'"><div class="hour-stack">'+segs+'</div>'+mark+tip+'</div>';
   }).join("");
   var legend = names.length > 1
