@@ -1,0 +1,6 @@
+id: ledger
+name: 账本
+description: 读执行日志统计真实用量：按天、按模型、缓存命中、会话累计，并给出账本口径覆盖多少。只读，不拦请求。
+version: 0.2.0
+apiVersion: "1.0.0"
+depends: [web, tools]
