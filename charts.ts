@@ -232,9 +232,9 @@ function hour24Chart(hours, metric){
   var slots = (hours || []).map(function(h){
     return h && h.label ? h : Object.assign({}, h, { label: String(h.hour).padStart(2, "0") + ":00" });
   });
-  if (!slots.length) return '<p class="sub">过去 24 小时没有记录。</p>';
+  if (!slots.length) return '<p class="sub">今天还没有记录。</p>';
   var raw = Math.max.apply(null, slots.map(val).concat([0]));
-  if (!raw) return '<p class="sub">过去 24 小时没有记录。</p>';
+  if (!raw) return '<p class="sub">今天还没有记录。</p>';
   var step = nice(raw/4), top = step*4;
   var ticks = [4,3,2,1,0].map(function(i){return tick(step*i);});
   var grid = [4,3,2,1].map(function(i){return '<i style="bottom:'+i*25+'%"></i>';}).join("");
@@ -258,7 +258,7 @@ function hour24Chart(hours, metric){
         '<span class="hour-tip-row">调用<b>'+n(d.rounds)+' 次</b></span>' +
         '<span class="hour-tip-row">参考<b>'+(d.cost == null ? "—" : money(d.cost))+'</b></span></div>'
       : '<div class="hour-tip'+flip+'"><strong>'+esc(d.label)+'</strong><span class="hour-tip-row empty">无记录</span></div>';
-    var mark = (i % 3 === 0) ? '<em class="hour-mark">'+esc(d.label).replace(":00","")+'</em>' : "";
+    var mark = (i % 3 === 0) ? '<em class="hour-mark">'+esc(d.label)+'</em>' : "";
     return '<div class="hour-bar'+(d.rounds?"":" day-zero")+'"><div class="hour-stack">'+segs+'</div>'+mark+tip+'</div>';
   }).join("");
   var legend = names.length > 1
@@ -292,9 +292,9 @@ function render(d, metric){
     '<button data-metric="input" class="'+(isCost?"":"on")+'">输入 token</button>' +
     '<button data-metric="cost" class="'+(isCost?"on":"")+'">参考金额</button></span>';
   box.innerHTML = cards(d.summary) +
-    '<div class="panel"><div class="panel-head"><h2>过去 24 小时</h2>'+tabs+
+    '<div class="panel"><div class="panel-head"><h2>今日 00:00–24:00</h2>'+tabs+
     '<span class="badge">按钟点 · 分模型</span></div>'+hour24Chart(d.summary.byHour24||[], metric)+
-    '<p class="sub">窗口内每次请求按发生时刻归到钟点，最近 24 小时；一根柱子里按模型分段堆叠。</p></div>' +
+    '<p class="sub">今天的 0 点到 24 点，每小时一格（还没到的小时留空）；一根柱子里按模型分段堆叠。</p></div>' +
     '<div class="panel"><div class="panel-head"><h2>每日'+(isCost?"参考金额":"输入 token")+'</h2>'+
     '<span class="badge">最近 7 天</span></div>'+dayChart(d.summary.byDay||[], metric)+
     '<p class="sub">'+(isCost

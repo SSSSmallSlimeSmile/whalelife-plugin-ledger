@@ -160,21 +160,17 @@ function mergeHours(
   now: number,
   timeZone: string,
 ): HourSlot[] {
-  // 24 个真实时段，从 now-23h 排到 now。之前只按钟点 0–23 平铺，
-  // 凌晨一点看图上最右边是 23 点，像在看过期的整天；跨日时同一个钟点
-  // 还会被并成一格。现在键带日期、位置按时间排，一眼看得出这是几点。
+  // 固定显示「今天」的 00:00–24:00，24 格不多不少。
+  // 之前的滚动窗口（now-23h → now）在凌晨看会一头雾水，也看不出今天到底是几点花的。
+  // 现在左侧永远是 00:00，还没到的小时留空。
   const today = dayOf(now, timeZone);
   const slots: HourSlot[] = [];
   const index = new Map<string, HourSlot>();
-  for (let i = 23; i >= 0; i -= 1) {
-    const at = now - i * 60 * 60 * 1000;
-    const day = dayOf(at, timeZone);
-    const hour = hourOf(at, timeZone);
+  for (let hour = 0; hour < 24; hour += 1) {
     const pad = String(hour).padStart(2, "0");
-    const label = day === today ? `${pad}:00` : `${day.slice(5)} ${pad}:00`;
-    const slot: HourSlot = { hour, day, label, rounds: 0, input: 0, output: 0, cost: null, parts: [] };
+    const slot: HourSlot = { hour, day: today, label: `${pad}:00`, rounds: 0, input: 0, output: 0, cost: null, parts: [] };
     slots.push(slot);
-    index.set(`${day}|${hour}`, slot);
+    index.set(`${today}|${hour}`, slot);
   }
   for (const { day, hour, row } of hourly.values()) {
     const slot = index.get(`${day}|${hour}`);
@@ -331,7 +327,7 @@ export async function summarize(cfg: Config, days: number, now = Date.now(), sco
     files: scanned, skipped,
     rounds: total.rounds, input: total.input, output: total.output, cached: total.cached,
     cost: total.cost, pricedRounds: total.pricedRounds,
-    byDay: [...byDayMap.values()].sort((a, b) => b.day.localeCompare(a.day)),
+    byDay: [...byDayMap.values()].sort((a, b) => a.day.localeCompare(b.day)),
     byModel: models.sort((a, b) => b.input - a.input),
     byModelTotal: totalByModel(models),
     byHour: [...byHour.values()].sort((a, b) => a.hour - b.hour),
