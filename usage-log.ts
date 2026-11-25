@@ -8,7 +8,7 @@
  * 只读：本插件不改宿主的任何文件，只读日志、读自己的配置。
  * 读别的目录前要用户自己填路径——宿主没有公开「根目录」接口，也不该有。
  */
-import type { Context } from "../../core/context.ts";
+import type { Context } from "whalelife";
 import { chartShell } from "./charts.ts";
 import { readdir, readFile, mkdir } from "node:fs/promises";
 import { resolve, join, dirname, basename, sep } from "node:path";
@@ -516,7 +516,10 @@ function registerPage(ctx: Context, disposers: Array<() => void>) {
     try { summary = await summarize(cfg, days); } catch (e: any) { error = String(e?.message ?? e); }
     const ledger = summary ? await ledgerOf(ctx, days) : { ok: false, error: "" };
     let sessions: any = null;
-    try { sessions = await sessionUsage(ctx, days); } catch (e: any) { sessions = { ok: false, error: String(e?.message ?? e) }; }
+    if (cfg.logDir) {
+      try { sessions = await sessionUsage(ctx, "all", days); }
+      catch (e: any) { sessions = { ok: false, error: String(e?.message ?? e) }; }
+    }
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
     res.end(JSON.stringify({ ok: !error, error, html: renderBody(cfg, days, summary, error, ledger, sessions) }));
   });
@@ -666,7 +669,7 @@ function renderBody(cfg: Config, days: number, summary: Summary | null, error: s
   if (sessions) {
     body += renderSessions(sessions);
   }
-  body += `<details><summary>设置</summary><form method="post" action="/plugins/ledger/save">
+  body += `<details${cfg.logDir ? "" : " open"}><summary>设置</summary><form method="post" action="/plugins/ledger/save">
 <label>执行日志目录（必填）</label>
 <input name="logDir" value="${esc(cfg.logDir)}" placeholder="<宿主目录>\\logs\\executions">
 <label>时区</label>
@@ -690,8 +693,11 @@ function renderShell(days: number) {
 const box=document.getElementById("data");
 fetch("/plugins/ledger/log?days=${days}",{cache:"no-store"})
   .then(r=>r.json())
-  .then(j=>{box.innerHTML=j.ok?j.html:'<div class="err">'+(j.error||"未知")+'</div>';})
-  .catch(e=>{box.innerHTML='<div class="err">加载失败：'+e+'</div>';});
+  .then(j=>{
+    if(typeof j.html!=="string") throw new Error(j.error||"未知");
+    box.innerHTML=j.html;
+  })
+  .catch(e=>{box.classList.add("err");box.textContent="加载失败："+e.message;});
 </script></body></html>`;
 }
 

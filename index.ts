@@ -11,11 +11,12 @@
  * 页面直接引用宿主的 /ui/styles.css，所以它和管理页是同一套样式，
  * 不是照着画一份，宿主改配色这里跟着变。
  */
-import type { Context } from "../../core/context.ts";
+import type { Context } from "whalelife";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectDays, collectHours } from "./usage.ts";
+import { sessionUsage, usageText } from "./consumption.ts";
 import { registerUsageTools } from "./usage-log.ts";
 import { VERIFIED } from "./prices.ts";
 
@@ -81,10 +82,15 @@ export async function apply(ctx: Context) {
 
   ctx.tools.register({
     name: "ledger_today",
-    description: "查今天到目前为止各模型的 token 用量和参考金额。金额按价目表重算，不是账单。",
+    description: "查询本会话累计 token 用量。full 权限可查全实例今日各模型的 token 用量和参考金额。",
     danger: "safe",
     schema: { type: "object", properties: {}, additionalProperties: false },
-    async run() {
+    async run(_args, session) {
+      if (session?.permission !== "full") {
+        const summary = await sessionUsage(ctx, { id: session?.id, personaId: session?.personaId });
+        const note = session?.id ? "\n范围：仅本会话，宿主提供会话累计用量。" : "";
+        return { ok: summary.ok, result: usageText(summary) + note };
+      }
       const global = { ...(await loadGlobal()), include_judge_usage: cfg.include_judge_usage };
       const [rows, hourly] = await Promise.all([
         collectDays(ROOT, global, 1),

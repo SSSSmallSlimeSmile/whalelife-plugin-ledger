@@ -25,6 +25,8 @@ export type UsageSummary = {
   memory: UsageTotals;
 };
 
+type UsageScope = "all" | { id?: string; personaId?: string };
+
 const zero = (): UsageTotals => ({ input_tokens: 0, output_tokens: 0, requests: 0, unknown_requests: 0 });
 
 function add(into: UsageTotals, from?: UsageTotals) {
@@ -49,24 +51,32 @@ async function personaKeys(ctx: any): Promise<string[]> {
 /**
  * 逐个会话读累计用量。
  * context(id, persona) 要求 persona 存在，所以先探出能用的那个，之后复用。
- * days > 0 时只算 updatedAt 落在窗口内的会话（兜底：没有 updatedAt 就照算）。
+ * 全局范围可以按 updatedAt 筛选。单会话接口不返回更新时间，沿用缺失时纳入统计的规则。
  */
-export async function sessionUsage(ctx: any, days = 0): Promise<UsageSummary> {
-  const api = ctx.sessions;
+export async function sessionUsage(ctx: any, scope: UsageScope, days = 0): Promise<UsageSummary> {
   const out: UsageSummary = { ok: false, sessions: [], chat: zero(), memory: zero() };
-  if (!api || typeof api.list !== "function" || typeof api.context !== "function") {
-    return { ...out, error: "宿主没有 sessions.list/context（版本太旧？）" };
+  if (scope !== "all" && !scope.id) {
+    return { ...out, error: "没有可统计的范围：当前调用既没有 full 权限，也拿不到会话 id。" };
+  }
+  const api = ctx.sessions;
+  if (typeof api?.context !== "function") {
+    return { ...out, error: "宿主没有 sessions.context（版本太旧？）" };
   }
 
   let list: any[];
-  try {
-    list = await api.list();
-    if (!Array.isArray(list)) return { ...out, error: "sessions.list() 没返回数组" };
-  } catch (error: any) {
-    return { ...out, error: `列会话失败：${String(error?.message ?? error)}` };
+  if (scope === "all") {
+    try {
+      list = await api.list();
+      if (!Array.isArray(list)) return { ...out, error: "sessions.list() 没返回数组" };
+    } catch (error: any) {
+      return { ...out, error: `列会话失败：${String(error?.message ?? error)}` };
+    }
+  } else {
+    list = [{ id: scope.id }];
   }
 
-  const keys = await personaKeys(ctx);
+  const persona = scope === "all" ? undefined : scope.personaId;
+  const keys = persona ? [persona] : await personaKeys(ctx);
   if (!keys.length) return { ...out, error: "ctx.personas.list() 没给出任何人格" };
 
   const cutoff = days > 0 ? Date.now() - days * 86400000 : 0;
@@ -99,7 +109,7 @@ export async function sessionUsage(ctx: any, days = 0): Promise<UsageSummary> {
     const chat = got.consumption?.chat ?? zero();
     const memory = got.consumption?.memory ?? zero();
     if (!got.consumption) continue;
-    out.sessions.push({ id, name: String(item?.name ?? id), updatedAt, chat, memory });
+    out.sessions.push({ id, name: String(item?.name ?? got.name ?? id), updatedAt, chat, memory });
     add(out.chat, chat);
     add(out.memory, memory);
   }
@@ -138,7 +148,7 @@ export function registerConsumption(ctx: any, disposers: Array<() => void>) {
       const days = Math.min(60, Math.max(0, Number(url.searchParams.get("days")) || 0));
       let summary: UsageSummary;
       try {
-        summary = await sessionUsage(ctx, days);
+        summary = await sessionUsage(ctx, "all", days);
       } catch (error: any) {
         summary = { ok: false, error: String(error?.message ?? error), sessions: [], chat: zero(), memory: zero() };
       }
@@ -152,34 +162,22 @@ export function registerConsumption(ctx: any, disposers: Array<() => void>) {
     ctx.tools.register({
       name: "usage_sessions",
       description:
-        "读宿主 sessions.context() 里每个会话的累计用量（请求数、输入/输出 token）。" +
+        "读宿主的累计用量（请求数、输入/输出 token）。普通调用只读本会话，full 权限可汇总全部会话。" +
         "比账本准：账本每轮只记最后一笔请求，这里是会话累计。只读。",
       schema: {
         type: "object",
         properties: {
-          days: { type: "integer", description: "只算最近几天更新过的会话；0 表示全部，默认 0", minimum: 0, maximum: 60 },
+          days: { type: "integer", description: "全局查询只算最近几天更新过的会话；0 表示全部，默认 0", minimum: 0, maximum: 60 },
         },
         additionalProperties: false,
       },
       danger: "safe",
       async run(args: any, session: any) {
         const days = Math.min(60, Math.max(0, Number(args?.days) || 0));
-        const permission = String(session?.permission ?? "ask");
-        const summary = await sessionUsage(ctx, days);
-        if (permission !== "full") {
-          // 普通调用只给它自己那条会话，别把别人的会话标识和名称一并吐出去。
-          const mine = String(session?.id ?? "");
-          const rows = mine ? summary.sessions.filter((row) => row.id === mine) : [];
-          const chat = zero();
-          const memory = zero();
-          for (const row of rows) { add(chat, row.chat); add(memory, row.memory); }
-          const scoped: UsageSummary = { ...summary, sessions: rows, chat, memory };
-          const text = mine
-            ? usageText(scoped) + "\n范围：仅本会话（没有 full 权限，只看自己这条）。"
-            : "没有可统计的范围：当前调用既没有 full 权限，也拿不到会话 id。";
-          return { text, summary: scoped };
-        }
-        return { text: usageText(summary), summary };
+        const scope = session?.permission === "full" ? "all" : { id: session?.id, personaId: session?.personaId };
+        const summary = await sessionUsage(ctx, scope, days);
+        const note = scope !== "all" && scope.id ? "\n范围：仅本会话。" : "";
+        return { text: usageText(summary) + note, summary };
       },
     }),
   );
